@@ -43,11 +43,19 @@ app.get('/users', async (req, res) => {
 })
 
 //Equipment-Related API............................................................
+//Api for add-equipment page as owner
 app.post("/equipments", async (req, res) => {
   const equipment = req.body;
   const result = await equipmentCollection.insertOne(equipment);
   res.send(result);
   console.log("Equipment: ", result);
+})
+//Api for the my-equipment page for owner
+app.get("/equipments/:email", async (req, res) => {
+  const email = req.params.email;
+  const result = await equipmentCollection.find({ownerEmail: email}).toArray();
+  res.send(result);
+  console.log("Get Equipments: ", result);
 })
 
 //Listener....................................................................
