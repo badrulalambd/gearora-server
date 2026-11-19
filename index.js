@@ -57,6 +57,14 @@ app.get("/equipments/:email", async (req, res) => {
   res.send(result);
   console.log("Get Equipments: ", result);
 })
+//Api to delete an equipment from the my-equipment page from owner
+app.delete("/equipments/:id", async (req, res) => {
+   const id = req.params.id;
+  const query = { _id: new ObjectId(id) };
+  const result = await equipmentCollection.deleteOne(query);
+  res.send(result);
+  console.log("Deleted Job: ", result);
+})
 
 //Listener....................................................................
 app.listen(port, () => {
