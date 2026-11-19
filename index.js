@@ -28,12 +28,13 @@ export async function disconnectFromMongoDB() {
 const connection = await connectToMongoDB();
 const database = connection.db("gearoradb");
 const userCollection = database.collection("user");
+const equipmentCollection = database.collection("equipments");
 
 app.get('/', (req, res) => {
   res.send('GearOra Server is running!')
 })
 
-//Users-Related API............................................................
+//User-Related API............................................................
 //GET API
 app.get('/users', async (req, res) => {
   const result = await userCollection.find({}).toArray();
@@ -41,6 +42,15 @@ app.get('/users', async (req, res) => {
   res.send(result);
 })
 
+//Equipment-Related API............................................................
+app.post("/equipments", async (req, res) => {
+  const equipment = req.body;
+  const result = await equipmentCollection.insertOne(equipment);
+  res.send(result);
+  console.log("Equipment: ", result);
+})
+
+//Listener....................................................................
 app.listen(port, () => {
   console.log(`GearOra server is running on port ${port}`)
 })
