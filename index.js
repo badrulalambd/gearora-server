@@ -53,18 +53,53 @@ app.post("/equipments", async (req, res) => {
 //Api for the my-equipment page for owner
 app.get("/equipments/:email", async (req, res) => {
   const email = req.params.email;
-  const result = await equipmentCollection.find({ownerEmail: email}).toArray();
+  const result = await equipmentCollection.find({ ownerEmail: email }).toArray();
   res.send(result);
   console.log("Get Equipments: ", result);
 })
 //Api to delete an equipment from the my-equipment page from owner
 app.delete("/equipments/:id", async (req, res) => {
-   const id = req.params.id;
+  const id = req.params.id;
   const query = { _id: new ObjectId(id) };
   const result = await equipmentCollection.deleteOne(query);
   res.send(result);
   console.log("Deleted Job: ", result);
 })
+//Api to update an equipment detail as a owner from the my-equipment page
+app.patch("/update-equipment/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updatedEquipment = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid equipment ID." });
+    }
+
+    const result = await equipmentCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: updatedEquipment,
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({ message: "Equipment not found." });
+    }
+
+    res.send({
+      message: "Equipment updated successfully.",
+      modifiedCount: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Error updating equipment:", error);
+
+    res.status(500).send({
+      message: "Failed to update equipment.",
+    });
+  }
+});
+
+
 
 //Listener....................................................................
 app.listen(port, () => {
