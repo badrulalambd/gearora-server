@@ -42,6 +42,46 @@ app.get('/users', async (req, res) => {
   res.send(result);
 })
 
+//Api to update a user's profile details from the profile page
+app.patch("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, image, phone, address } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid user ID." });
+    }
+
+    //Only whitelisted profile fields are updatable — never email or role.
+    const updates = {};
+    if (typeof name === "string") updates.name = name.trim();
+    if (typeof image === "string") updates.image = image;
+    if (typeof phone === "string") updates.phone = phone.trim();
+    if (typeof address === "string") updates.address = address.trim();
+    updates.updatedAt = new Date();
+
+    const result = await userCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updates }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({ message: "User not found." });
+    }
+
+    res.send({
+      message: "Profile updated successfully.",
+      modifiedCount: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Error updating user profile:", error);
+
+    res.status(500).send({
+      message: "Failed to update profile.",
+    });
+  }
+});
+
 //Equipment-Related API............................................................
 //Api for add-equipment page as owner
 app.post("/equipments", async (req, res) => {
