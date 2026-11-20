@@ -2,6 +2,7 @@ import 'dotenv/config'
 import express from 'express';
 import cors from 'cors'
 import { MongoClient, ObjectId } from 'mongodb';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -10,6 +11,7 @@ const port = process.env.PORT || 5000;
 app.use(express.json());
 app.use(cors());
 
+//MongoDB connection
 const client = new MongoClient(`mongodb://${process.env.MONGODB_USER}:${process.env.MONGODB_PASSWORD}@ac-n9vqlya-shard-00-00.d1i0h77.mongodb.net:27017,ac-n9vqlya-shard-00-01.d1i0h77.mongodb.net:27017,ac-n9vqlya-shard-00-02.d1i0h77.mongodb.net:27017/?ssl=true&replicaSet=atlas-7upjpt-shard-0&authSource=admin`);
 export async function connectToMongoDB() {
   try {
@@ -25,11 +27,38 @@ export async function disconnectFromMongoDB() {
   await client.close();
 }
 
+//Connect mongoDB database.......................................................
 const connection = await connectToMongoDB();
 const database = connection.db("gearoradb");
+//Create database collections
 const userCollection = database.collection("user");
 const equipmentCollection = database.collection("equipments");
+const bookingCollection = database.collection("bookings");
 
+//JSON Web Token (JWT) Middleware method.....................................................
+const verifyUserWithMiddlewareToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).send({ msg: "Unauthorized authHeader" });
+  }
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    return res.status(401).send({ msg: "Unauthorized Token" });
+  }
+  const JWKS = createRemoteJWKSet(
+    new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
+  )
+
+  try {
+    const { payload } = await jwtVerify(token, JWKS);
+    next();
+  } catch (error) {
+    return res.status(500).send({ msg: "Server Error" }, error);
+  }
+}
+
+
+//API creation start.............................................................
 app.get('/', (req, res) => {
   res.send('GearOra Server is running!')
 })
