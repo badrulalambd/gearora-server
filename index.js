@@ -90,6 +90,86 @@ app.post("/equipments", async (req, res) => {
   res.send(result);
   console.log("Equipment: ", result);
 })
+//Helper to keep user search input out of regex syntax
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+//Api for all equipments public page: approved equipment only, with backend
+//search, filtering and sorting via query params.
+//Params: search, category, rentalType, minPrice, maxPrice, availability, sort
+app.get("/equipments", async (req, res) => {
+  try {
+    const { search, category, rentalType, minPrice, maxPrice, availability, sort } = req.query;
+
+    //Only approved equipment is publicly visible.
+    const query = { status: "Approved" };
+
+    //Search by equipment name OR location (case-insensitive).
+    if (typeof search === "string" && search.trim()) {
+      const pattern = new RegExp(escapeRegex(search.trim()), "i");
+      query.$or = [{ name: pattern }, { location: pattern }];
+    }
+
+    if (typeof category === "string" && category) query.category = category;
+    if (typeof rentalType === "string" && rentalType) query.rentalType = rentalType;
+
+    //Price range filter.
+    const price = {};
+    if (typeof minPrice === "string" && minPrice && Number.isFinite(Number(minPrice))) {
+      price.$gte = Number(minPrice);
+    }
+    if (typeof maxPrice === "string" && maxPrice && Number.isFinite(Number(maxPrice))) {
+      price.$lte = Number(maxPrice);
+    }
+    if (Object.keys(price).length > 0) query.rentalPrice = price;
+
+    //Availability filter (availability is derived from quantity).
+    if (availability === "available") query.quantity = { $gt: 0 };
+    else if (availability === "out-of-stock") query.quantity = { $lte: 0 };
+
+    //Sorting: price low→high, price high→low, or recently added (newest first).
+    let sortSpec = { _id: -1 };
+    if (sort === "price-asc") sortSpec = { rentalPrice: 1, _id: -1 };
+    else if (sort === "price-desc") sortSpec = { rentalPrice: -1, _id: -1 };
+
+    const result = await equipmentCollection.find(query).sort(sortSpec).toArray();
+    res.send(result);
+  } catch (error) {
+    console.error("Error fetching equipments:", error);
+    res.status(500).send({ message: "Failed to fetch equipments." });
+  }
+})
+//Distinct categories of approved equipment, for the public page's category filter
+app.get("/equipments/categories", async (req, res) => {
+  try {
+    const categories = await equipmentCollection
+      .distinct("category", { status: "Approved", category: { $exists: true, $ne: "" } });
+    res.send(categories.sort());
+  } catch (error) {
+    console.error("Error fetching equipment categories:", error);
+    res.status(500).send({ message: "Failed to fetch equipment categories." });
+  }
+})
+//Api for a single equipment detail page
+app.get("/equipment/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid equipment ID." });
+    }
+
+    const result = await equipmentCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!result) {
+      return res.status(404).send({ message: "Equipment not found." });
+    }
+
+    res.send(result);
+  } catch (error) {
+    console.error("Error fetching equipment:", error);
+    res.status(500).send({ message: "Failed to fetch equipment." });
+  }
+})
 //Api for the my-equipment page for owner
 app.get("/equipments/:email", async (req, res) => {
   const email = req.params.email;
