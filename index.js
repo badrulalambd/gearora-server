@@ -259,6 +259,43 @@ app.get("/equipments/categories", async (req, res) => {
   }
 })
 
+//Popular categories of approved equipment for the home page categories section
+app.get("/equipments/popular-categories", async (req, res) => {
+  try {
+    const categories = await equipmentCollection.aggregate([
+      {
+        $match: {
+          status: "Approved",
+          category: { $exists: true, $ne: "" },
+        },
+      },
+      {
+        $group: {
+          _id: "$category",
+          totalEquipment: { $sum: 1 },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          category: "$_id",
+          totalEquipment: 1,
+        },
+      },
+      {
+        $sort: { totalEquipment: -1 },
+      },
+    ]).toArray();
+
+    res.send(categories);
+  } catch (error) {
+    console.error("Error fetching equipment categories:", error);
+    res.status(500).send({
+      message: "Failed to fetch equipment categories.",
+    });
+  }
+});
+
 //Api for the admin All Equipment page: every listing regardless of status.
 //Must be registered before GET /equipments/:email.
 app.get("/equipments/all", async (req, res) => {
