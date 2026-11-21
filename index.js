@@ -729,3 +729,5 @@ app.get("/bookings", async (req, res) => {
 app.listen(port, () => {
   console.log(`GearOra server is running on port ${port}`)
 })
+
+export default app;
