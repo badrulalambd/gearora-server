@@ -3,6 +3,8 @@ import express from 'express';
 import cors from 'cors'
 import { MongoClient, ObjectId } from 'mongodb';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
+import Stripe from 'stripe';
+
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -34,6 +36,11 @@ const database = connection.db("gearoradb");
 const userCollection = database.collection("user");
 const equipmentCollection = database.collection("equipments");
 const bookingCollection = database.collection("bookings");
+const favoriteCollection = database.collection("favorites");
+const paymentCollection = database.collection("payments");
+
+//Stripe client (secret key lives in .env; STRIPTE_SECRET_KEY is the current spelling there)
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || process.env.STRIPTE_SECRET_KEY);
 
 //JSON Web Token (JWT) Middleware method.....................................................
 const verifyUserWithMiddlewareToken = async (req, res, next) => {
@@ -249,6 +256,300 @@ app.patch("/update-equipment/:id", async (req, res) => {
 });
 
 
+//Favorites-Related API (customer saved equipment)............................
+//Add an equipment to a customer's favorites (stores a snapshot for the list page)
+app.post("/favorites", async (req, res) => {
+  try {
+    const { customerId, customerEmail, equipmentId } = req.body;
+
+    if (!customerEmail || !equipmentId) {
+      return res.status(400).send({ success: false, message: "Customer and equipment are required." });
+    }
+    if (!ObjectId.isValid(equipmentId)) {
+      return res.status(400).send({ success: false, message: "Invalid equipment ID." });
+    }
+
+    const equipment = await equipmentCollection.findOne({ _id: new ObjectId(equipmentId) });
+    if (!equipment) {
+      return res.status(404).send({ success: false, message: "Equipment not found." });
+    }
+
+    const existing = await favoriteCollection.findOne({ customerEmail, equipmentId });
+    if (existing) {
+      return res.send({ success: true, message: "Already in your favorites.", data: { _id: existing._id.toString() } });
+    }
+
+    const favorite = {
+      customerId: customerId || "",
+      customerEmail,
+      equipmentId,
+      equipmentName: equipment.name,
+      equipmentImage: equipment.image || "",
+      category: equipment.category,
+      rentalPrice: equipment.rentalPrice,
+      rentalType: equipment.rentalType,
+      location: equipment.location,
+      addedAt: new Date(),
+    };
+    const result = await favoriteCollection.insertOne(favorite);
+
+    res.send({
+      success: true,
+      message: "Added to favorites.",
+      data: { _id: result.insertedId.toString() },
+    });
+  } catch (error) {
+    console.error("Error adding favorite:", error);
+    res.status(500).send({ success: false, message: "Failed to add to favorites." });
+  }
+});
+
+//All favorites saved by one customer (newest first)
+app.get("/favorites/:email", async (req, res) => {
+  try {
+    const result = await favoriteCollection
+      .find({ customerEmail: req.params.email })
+      .sort({ addedAt: -1 })
+      .toArray();
+    res.send(result);
+  } catch (error) {
+    console.error("Error fetching favorites:", error);
+    res.status(500).send({ message: "Failed to fetch favorites." });
+  }
+});
+
+//Remove one favorite from the customer's list
+app.delete("/favorites/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ success: false, message: "Invalid favorite ID." });
+    }
+
+    const result = await favoriteCollection.deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+      return res.status(404).send({ success: false, message: "Favorite not found." });
+    }
+
+    res.send({ success: true, message: "Removed from favorites." });
+  } catch (error) {
+    console.error("Error deleting favorite:", error);
+    res.status(500).send({ success: false, message: "Failed to remove favorite." });
+  }
+});
+
+
+//Booking-Related API............................................................
+//Rental duration in billing units of the equipment's rental type (simple calculation)
+const rentalUnits = (rentalType, startDate, endDate) => {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  const days = Math.max(1, Math.ceil((end - start) / 86400000));
+  if (rentalType === "weekly") return Math.ceil(days / 7);
+  if (rentalType === "monthly") return Math.ceil(days / 30);
+  return days; //daily & hourly are billed per day
+};
+
+//Create a pending booking and a Stripe Checkout session for the booking form
+app.post("/create-checkout-session", async (req, res) => {
+  try {
+    const {
+      equipmentId, customerEmail, customerId,
+      startDate, endDate, quantity, contactNumber, deliveryAddress, notes,
+    } = req.body;
+
+    //Step-1: check if the equipment exists
+    if (!equipmentId || !ObjectId.isValid(equipmentId)) {
+      return res.status(400).send({ success: false, message: "Invalid equipment ID." });
+    }
+    if (!customerEmail) {
+      return res.status(400).send({ success: false, message: "Customer is required." });
+    }
+    const equipment = await equipmentCollection.findOne({ _id: new ObjectId(equipmentId) });
+    if (!equipment) {
+      return res.status(404).send({ success: false, message: "Equipment not found" });
+    }
+
+    //Step-2: validate quantity against availability
+    const qty = Number.parseInt(quantity, 10);
+    if (!Number.isFinite(qty) || qty < 1) {
+      return res.status(400).send({ success: false, message: "Invalid quantity." });
+    }
+    if (qty > equipment.quantity) {
+      return res.status(400).send({
+        success: false,
+        message: `Only ${equipment.quantity} unit(s) of this equipment are available.`,
+      });
+    }
+
+    //Step-3: validate rental dates (no past start date, end on/after start)
+    if (!startDate || !endDate) {
+      return res.status(400).send({ success: false, message: "Rental dates are required." });
+    }
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return res.status(400).send({ success: false, message: "Invalid rental dates." });
+    }
+    const todayStr = new Date().toISOString().slice(0, 10);
+    if (startDate < todayStr) {
+      return res.status(400).send({ success: false, message: "Rental start date cannot be in the past." });
+    }
+    if (end < start) {
+      return res.status(400).send({ success: false, message: "Rental end date must be on or after the start date." });
+    }
+
+    //Step-4: total rental amount = price × duration units × quantity
+    const units = rentalUnits(equipment.rentalType, start, end);
+    const totalAmount = equipment.rentalPrice * units * qty; //in the site's currency
+    //Stripe charges in USD cents (prices are stored in BDT — existing site conversion)
+    const amountCents = Math.max(50, Math.round(totalAmount * 0.00804 * 100));
+
+    //Step-5: Create a booking in the database with booking status pending
+    const booking = {
+      equipmentId,
+      equipmentName: equipment.name,
+      equipmentImage: equipment.image || "",
+      category: equipment.category,
+      customerId: customerId || "",
+      customerEmail,
+      startDate: start,
+      endDate: end,
+      quantity: qty,
+      contactNumber: typeof contactNumber === "string" ? contactNumber.trim() : "",
+      deliveryAddress: typeof deliveryAddress === "string" ? deliveryAddress.trim() : "",
+      notes: typeof notes === "string" ? notes.trim() : "",
+      rentalType: equipment.rentalType,
+      rentalPrice: equipment.rentalPrice,
+      durationUnits: units,
+      totalAmount,
+      status: "pending",
+      paymentStatus: "pending",
+      createdAt: new Date(),
+    };
+    const bookingCreatedResult = await bookingCollection.insertOne(booking);
+    console.log("bookingCreatedResult: ", bookingCreatedResult);
+
+    //Step-6: Create a Stripe Checkout session
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      customer_email: customerEmail,
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: equipment.name,
+              description: `${units} × ${equipment.rentalType} × ${qty} unit(s)`,
+            },
+            unit_amount: amountCents,
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: `${process.env.CLIENT_URL}/booking/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.CLIENT_URL}/booking/cancel`,
+      metadata: {
+        bookingId: bookingCreatedResult.insertedId.toString(),
+        equipmentId,
+        customerEmail,
+      },
+    });
+    console.log("session: ", session.id);
+
+    await bookingCollection.updateOne(
+      { _id: bookingCreatedResult.insertedId },
+      { $set: { stripeSessionId: session.id } }
+    );
+
+    res.send({ success: true, message: "Checkout session created", data: { redirectUrl: session.url } });
+  } catch (error) {
+    console.error("Error creating checkout session:", error);
+    res.status(500).send({ success: false, message: "Failed to start checkout. Please try again." });
+  }
+})
+
+//Confirm a paid checkout: booking pending→confirmed + record the payment
+app.post("/bookings/confirm", async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) {
+      return res.status(400).send({ success: false, message: "Session ID is required." });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.payment_status !== "paid") {
+      return res.status(402).send({ success: false, message: "Payment has not been completed." });
+    }
+
+    const bookingId = session.metadata?.bookingId;
+    if (!bookingId || !ObjectId.isValid(bookingId)) {
+      return res.status(400).send({ success: false, message: "Invalid booking reference." });
+    }
+    const booking = await bookingCollection.findOne({ _id: new ObjectId(bookingId) });
+    if (!booking) {
+      return res.status(404).send({ success: false, message: "Booking not found." });
+    }
+
+    const paymentIntentId =
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent?.id || "";
+
+    //Record the transaction once (success page can be refreshed safely)
+    const existingPayment = await paymentCollection.findOne({ sessionId });
+    if (!existingPayment) {
+      await paymentCollection.insertOne({
+        bookingId,
+        sessionId,
+        paymentIntentId,
+        amount: session.amount_total,
+        currency: session.currency,
+        customerEmail: booking.customerEmail,
+        equipmentId: booking.equipmentId,
+        status: "succeeded",
+        createdAt: new Date(),
+      });
+    }
+
+    //Update the booking's payment status from pending to confirmed
+    if (booking.status !== "confirmed") {
+      await bookingCollection.updateOne(
+        { _id: new ObjectId(bookingId) },
+        {
+          $set: {
+            status: "confirmed",
+            paymentStatus: "confirmed",
+            paidAt: new Date(),
+            transactionId: paymentIntentId,
+            amountPaid: session.amount_total,
+            currency: session.currency,
+          },
+        }
+      );
+    }
+
+    const updatedBooking = await bookingCollection.findOne({ _id: new ObjectId(bookingId) });
+    res.send({ success: true, message: "Payment confirmed.", data: { booking: updatedBooking } });
+  } catch (error) {
+    console.error("Error confirming booking:", error);
+    res.status(500).send({ success: false, message: "Failed to confirm payment." });
+  }
+})
+
+//Confirmed rentals for the customer's My Rentals page
+app.get("/bookings/customer/:email", async (req, res) => {
+  try {
+    const result = await bookingCollection
+      .find({ customerEmail: req.params.email, status: "confirmed" })
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.send(result);
+  } catch (error) {
+    console.error("Error fetching bookings:", error);
+    res.status(500).send({ message: "Failed to fetch rentals." });
+  }
+})
 
 //Listener....................................................................
 app.listen(port, () => {
