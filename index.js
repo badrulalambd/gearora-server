@@ -271,6 +271,26 @@ app.get("/equipments/all", async (req, res) => {
   }
 })
 
+//Featured-section api for home page
+app.get("/featured-equipments", async (req, res) => {
+  try {
+    const result = await equipmentCollection
+      .find({ status: "Approved" })
+      .sort({ _id: -1 })
+      .limit(6)
+      .toArray();
+
+    res.send(result);
+    console.log("Featured Equipment: ", result);
+  } catch (error) {
+    console.error("Error fetching featured equipments:", error);
+
+    res.status(500).send({
+      message: "Failed to fetch featured equipments.",
+    });
+  }
+});
+
 //Api for the admin All Equipment page: approve or reject a listing
 app.patch("/equipments/:id/status", async (req, res) => {
   try {
