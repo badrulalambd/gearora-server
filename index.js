@@ -118,6 +118,79 @@ app.patch("/users/:id", async (req, res) => {
   }
 });
 
+//Api for the admin All Users page: change a user's role from the dropdown
+app.patch("/users/:id/role", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid user ID." });
+    }
+
+    if (!["customer", "owner", "admin"].includes(role)) {
+      return res.status(400).send({ message: "Invalid role." });
+    }
+
+    const result = await userCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role, updatedAt: new Date() } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({ message: "User not found." });
+    }
+
+    res.send({
+      message: "Role updated successfully.",
+      modifiedCount: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Error updating user role:", error);
+
+    res.status(500).send({
+      message: "Failed to update role.",
+    });
+  }
+});
+
+//Api for the admin All Users page: delete a customer or owner account
+app.delete("/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid user ID." });
+    }
+
+    const user = await userCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!user) {
+      return res.status(404).send({ message: "User not found." });
+    }
+
+    //Admin accounts are never deletable from the All Users page.
+    if (user.role === "admin") {
+      return res
+        .status(403)
+        .send({ message: "Admin accounts cannot be deleted." });
+    }
+
+    const result = await userCollection.deleteOne({ _id: new ObjectId(id) });
+
+    res.send({
+      message: "User deleted successfully.",
+      deletedCount: result.deletedCount,
+    });
+  } catch (error) {
+    console.error("Error deleting user:", error);
+
+    res.status(500).send({
+      message: "Failed to delete user.",
+    });
+  }
+});
+
 //Equipment-Related API............................................................
 //Api for add-equipment page as owner
 app.post("/equipments", async (req, res) => {
@@ -183,6 +256,51 @@ app.get("/equipments/categories", async (req, res) => {
   } catch (error) {
     console.error("Error fetching equipment categories:", error);
     res.status(500).send({ message: "Failed to fetch equipment categories." });
+  }
+})
+
+//Api for the admin All Equipment page: every listing regardless of status.
+//Must be registered before GET /equipments/:email.
+app.get("/equipments/all", async (req, res) => {
+  try {
+    const result = await equipmentCollection.find({}).sort({ _id: -1 }).toArray();
+    res.send(result);
+  } catch (error) {
+    console.error("Error fetching all equipments:", error);
+    res.status(500).send({ message: "Failed to fetch equipments." });
+  }
+})
+
+//Api for the admin All Equipment page: approve or reject a listing
+app.patch("/equipments/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid equipment ID." });
+    }
+
+    if (!["Pending", "Approved", "Rejected"].includes(status)) {
+      return res.status(400).send({ message: "Invalid status." });
+    }
+
+    const result = await equipmentCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({ message: "Equipment not found." });
+    }
+
+    res.send({
+      message: "Equipment status updated.",
+      modifiedCount: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Error updating equipment status:", error);
+    res.status(500).send({ message: "Failed to update equipment status." });
   }
 })
 //Api for a single equipment detail page
@@ -544,6 +662,62 @@ app.get("/bookings/customer/:email", async (req, res) => {
       .find({ customerEmail: req.params.email, status: "confirmed" })
       .sort({ createdAt: -1 })
       .toArray();
+    res.send(result);
+  } catch (error) {
+    console.error("Error fetching bookings:", error);
+    res.status(500).send({ message: "Failed to fetch rentals." });
+  }
+})
+
+//Api for the admin All Rentals page: every booking, joined with the customer
+//and owner details. `?status=Pending|Approved|Rejected` filters on the
+//equipment's status directly in the database.
+app.get("/bookings", async (req, res) => {
+  try {
+    const { status } = req.query;
+    const query = {};
+
+    if (["Pending", "Approved", "Rejected"].includes(status)) {
+      const matching = await equipmentCollection
+        .find({ status }, { projection: { _id: 1 } })
+        .toArray();
+      //Bookings keep the equipment id as a plain string.
+      query.equipmentId = { $in: matching.map((eq) => eq._id.toString()) };
+    }
+
+    const bookings = await bookingCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    //Owner details live on the equipment document.
+    const equipmentIds = [
+      ...new Set(bookings.map((b) => b.equipmentId).filter((id) => id && ObjectId.isValid(id))),
+    ];
+    const equipments = await equipmentCollection
+      .find({ _id: { $in: equipmentIds.map((id) => new ObjectId(id)) } })
+      .toArray();
+    const equipmentMap = new Map(equipments.map((eq) => [eq._id.toString(), eq]));
+
+    //Customer details live on the user document.
+    const emails = [...new Set(bookings.map((b) => b.customerEmail).filter(Boolean))];
+    const customers = await userCollection.find({ email: { $in: emails } }).toArray();
+    const customerMap = new Map(customers.map((u) => [u.email, u]));
+
+    const result = bookings.map((booking) => {
+      const equipment = equipmentMap.get(booking.equipmentId);
+      const customer = customerMap.get(booking.customerEmail);
+
+      return {
+        ...booking,
+        customerName: customer?.name || booking.customerEmail,
+        customerImage: customer?.image || "",
+        ownerName: equipment?.ownerName || "",
+        ownerEmail: equipment?.ownerEmail || "",
+        equipmentStatus: equipment?.status || "",
+      };
+    });
+
     res.send(result);
   } catch (error) {
     console.error("Error fetching bookings:", error);
