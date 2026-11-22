@@ -38,6 +38,9 @@ const equipmentCollection = database.collection("equipments");
 const bookingCollection = database.collection("bookings");
 const favoriteCollection = database.collection("favorites");
 const paymentCollection = database.collection("payments");
+//BetterAuth stores credentials and sessions in these collections.
+const accountCollection = database.collection("account");
+const sessionCollection = database.collection("session");
 
 //Stripe client (secret key lives in .env; STRIPTE_SECRET_KEY is the current spelling there)
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || process.env.STRIPTE_SECRET_KEY);
@@ -176,11 +179,18 @@ app.delete("/users/:id", async (req, res) => {
         .send({ message: "Admin accounts cannot be deleted." });
     }
 
-    const result = await userCollection.deleteOne({ _id: new ObjectId(id) });
+    //Remove the BetterAuth credentials and sessions too — otherwise a
+    //re-registration with the same email hits a duplicate-key error. Both
+    //collections store userId as an ObjectId, not a string.
+    await Promise.all([
+      userCollection.deleteOne({ _id: new ObjectId(id) }),
+      accountCollection.deleteMany({ userId: new ObjectId(id) }),
+      sessionCollection.deleteMany({ userId: new ObjectId(id) }),
+    ]);
 
     res.send({
       message: "User deleted successfully.",
-      deletedCount: result.deletedCount,
+      deletedCount: 1,
     });
   } catch (error) {
     console.error("Error deleting user:", error);
@@ -381,6 +391,7 @@ app.get("/equipment/:id", async (req, res) => {
     res.status(500).send({ message: "Failed to fetch equipment." });
   }
 })
+
 //Api for the my-equipment page for owner
 app.get("/equipments/:email", async (req, res) => {
   const email = req.params.email;
@@ -388,6 +399,15 @@ app.get("/equipments/:email", async (req, res) => {
   res.send(result);
   console.log("Get Equipments: ", result);
 })
+
+//Api for the my-equipment page for owner
+app.get("/equipment-rental/:email", async (req, res) => {
+  const email = req.params.email;
+  const result = await equipmentCollection.find({ ownerEmail: email, status: "Approved" }).toArray();
+  res.send(result);
+  console.log("Get Equipments: ", result);
+})
+
 //Api to delete an equipment from the my-equipment page from owner
 app.delete("/equipments/:id", async (req, res) => {
   const id = req.params.id;
@@ -779,6 +799,179 @@ app.get("/bookings", async (req, res) => {
   } catch (error) {
     console.error("Error fetching bookings:", error);
     res.status(500).send({ message: "Failed to fetch rentals." });
+  }
+})
+
+//Dashboard Analytics API (admin, owner and customer overview pages).........
+
+//Bucket documents into the last 6 calendar months (oldest first) so every
+//dashboard chart can draw the same monthly series. `getValue` decides how
+//much each document adds to its month's total.
+const buildMonthlySeries = (items, getDate, getValue) => {
+  const buckets = [];
+  const now = new Date();
+
+  for (let offset = 5; offset >= 0; offset--) {
+    const date = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+    buckets.push({
+      key: `${date.getFullYear()}-${date.getMonth()}`,
+      month: date.toLocaleString("en-US", { month: "short" }),
+      value: 0,
+    });
+  }
+
+  const indexByKey = new Map(buckets.map((bucket, index) => [bucket.key, index]));
+
+  for (const item of items) {
+    const rawDate = getDate(item);
+    if (!rawDate) continue;
+
+    const date = new Date(rawDate);
+    if (Number.isNaN(date.getTime())) continue;
+
+    const index = indexByKey.get(`${date.getFullYear()}-${date.getMonth()}`);
+    if (index === undefined) continue;
+
+    buckets[index].value += Number(getValue(item)) || 0;
+  }
+
+  return buckets.map(({ month, value }) => ({ month, value }));
+};
+
+//Admin dashboard: platform totals + monthly booking statistics
+app.get("/stats/admin", async (req, res) => {
+  try {
+    const [totalUsers, totalEquipments, payments, bookings] = await Promise.all([
+      userCollection.countDocuments(),
+      equipmentCollection.countDocuments(),
+      paymentCollection.find({}, { projection: { bookingId: 1 } }).toArray(),
+      bookingCollection.find({}).toArray(),
+    ]);
+
+    const pendingApprovals = await equipmentCollection.countDocuments({ status: "Pending" });
+    const completedRentals = bookings.filter((booking) => booking.status === "confirmed").length;
+
+    //Total revenue: bookings that actually collected a payment.
+    const paidBookingIds = new Set(payments.map((payment) => String(payment.bookingId)));
+    const totalRevenue = bookings
+      .filter((booking) => paidBookingIds.has(String(booking._id)))
+      .reduce((sum, booking) => sum + (Number(booking.totalAmount) || 0), 0);
+
+    //Newest listings still waiting for a review (shown on the overview page).
+    const pendingListings = await equipmentCollection
+      .find({ status: "Pending" })
+      .sort({ _id: -1 })
+      .limit(5)
+      .toArray();
+
+    res.send({
+      totalUsers,
+      totalEquipments,
+      totalBookings: bookings.length,
+      pendingApprovals,
+      completedRentals,
+      totalRevenue,
+      monthlyBookings: buildMonthlySeries(bookings, (booking) => booking.createdAt, () => 1),
+      pendingEquipments: pendingListings.map((equipment) => ({
+        _id: equipment._id,
+        name: equipment.name,
+        ownerName: equipment.ownerName || "",
+        category: equipment.category || "",
+      })),
+    });
+  } catch (error) {
+    console.error("Error building admin stats:", error);
+    res.status(500).send({ message: "Failed to load dashboard stats." });
+  }
+})
+
+//Owner dashboard: the owner's own listings, rentals and earnings
+app.get("/stats/owner/:email", async (req, res) => {
+  try {
+    const equipments = await equipmentCollection
+      .find({ ownerEmail: req.params.email })
+      .toArray();
+    const equipmentIds = equipments.map((equipment) => equipment._id.toString());
+
+    const bookings = equipmentIds.length
+      ? await bookingCollection
+          .find({ equipmentId: { $in: equipmentIds } })
+          .sort({ createdAt: -1 })
+          .toArray()
+      : [];
+
+    const completed = bookings.filter((booking) => booking.status === "confirmed");
+    const totalEarnings = completed.reduce(
+      (sum, booking) => sum + (Number(booking.totalAmount) || 0),
+      0
+    );
+
+    //Latest bookings, joined with the customer's name and photo.
+    const recent = bookings.slice(0, 5);
+    const emails = [...new Set(recent.map((booking) => booking.customerEmail).filter(Boolean))];
+    const customers = emails.length
+      ? await userCollection.find({ email: { $in: emails } }).toArray()
+      : [];
+    const customerMap = new Map(customers.map((user) => [user.email, user]));
+
+    const recentBookings = recent.map((booking) => ({
+      _id: booking._id,
+      equipmentName: booking.equipmentName || "",
+      customerName: customerMap.get(booking.customerEmail)?.name || booking.customerEmail,
+      customerEmail: booking.customerEmail,
+      startDate: booking.startDate,
+      endDate: booking.endDate,
+      totalAmount: booking.totalAmount,
+      status: booking.status,
+      createdAt: booking.createdAt,
+    }));
+
+    res.send({
+      totalEquipment: equipments.length,
+      completedRentals: completed.length,
+      totalEarnings,
+      monthlyEarnings: buildMonthlySeries(
+        completed,
+        (booking) => booking.createdAt,
+        (booking) => Number(booking.totalAmount) || 0
+      ),
+      recentBookings,
+    });
+  } catch (error) {
+    console.error("Error building owner stats:", error);
+    res.status(500).send({ message: "Failed to load dashboard stats." });
+  }
+})
+
+//Customer dashboard: saved equipment and rental activity
+app.get("/stats/customer/:email", async (req, res) => {
+  try {
+    const customerEmail = req.params.email;
+
+    const [favorites, bookings] = await Promise.all([
+      favoriteCollection.find({ customerEmail }).sort({ addedAt: -1 }).toArray(),
+      bookingCollection.find({ customerEmail }).sort({ createdAt: -1 }).toArray(),
+    ]);
+
+    const confirmed = bookings.filter((booking) => booking.status === "confirmed");
+    const totalSpent = confirmed.reduce(
+      (sum, booking) => sum + (Number(booking.totalAmount) || 0),
+      0
+    );
+
+    res.send({
+      favorites,
+      rentals: bookings,
+      totalFavorites: favorites.length,
+      totalRentals: bookings.length,
+      confirmedRentals: confirmed.length,
+      pendingRentals: bookings.length - confirmed.length,
+      totalSpent,
+      monthlyRentals: buildMonthlySeries(confirmed, (booking) => booking.createdAt, () => 1),
+    });
+  } catch (error) {
+    console.error("Error building customer stats:", error);
+    res.status(500).send({ message: "Failed to load dashboard stats." });
   }
 })
 
