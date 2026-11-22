@@ -9,7 +9,7 @@ import Stripe from 'stripe';
 const app = express();
 const port = process.env.PORT || 5000;
 
-//Middleware
+//Middleware...................
 app.use(express.json());
 app.use(cors());
 
@@ -46,26 +46,67 @@ const sessionCollection = database.collection("session");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || process.env.STRIPTE_SECRET_KEY);
 
 //JSON Web Token (JWT) Middleware method.....................................................
-const verifyUserWithMiddlewareToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).send({ msg: "Unauthorized authHeader" });
-  }
-  const token = authHeader.split(" ")[1];
-  if (!token) {
-    return res.status(401).send({ msg: "Unauthorized Token" });
-  }
-  const JWKS = createRemoteJWKSet(
-    new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
-  )
+//..............................................................................................
+//....................................................MIDLEWARE START...........................
+//...............................................................................................
+const verifyToken = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        res.status(401).send({ message: 'Unauthorized' });
+        return;
+    }
+    const token = authHeader.split(' ')[1];
+    if (!token) {
+        res.status(401).send({ message: 'Unauthorized' });
+        return;
+    }
 
-  try {
-    const { payload } = await jwtVerify(token, JWKS);
+    const query = { token };
+    const session = await sessionCollection.findOne(query);
+    if (!session) {
+        res.status(401).send({ message: 'Unauthorized' });
+        return;
+    }
+
+    const userId = session.userId;
+
+    const userQuery = { _id: new ObjectId(userId) };
+    const user = await userCollection.findOne(userQuery);
+    if (!user) {
+        res.status(401).send({ message: 'Unauthorized' });
+        return;
+    }
+
+    req.user = user;
     next();
-  } catch (error) {
-    return res.status(500).send({ msg: "Server Error" }, error);
-  }
 }
+
+// must call this middleware after verifyToken
+const verifyCustomer = async (req, res, next) => {
+    if (req.user.role !== 'customer') {
+        res.status(403).send({ message: 'Forbidden' });
+        return;
+    }
+    next();
+}
+
+const verifyOwner = async (req, res, next) => {
+    if (req.user.role !== 'owner') {
+        res.status(403).send({ message: 'Forbidden' });
+        return;
+    }
+    next();
+}
+
+const verifyAdmin = async (req, res, next) => {
+    if (req.user.role !== 'admin') {
+        res.status(403).send({ message: 'Forbidden' });
+        return;
+    }
+    next();
+}
+//..............................................................MIDLEWARES END...........................
+
 
 
 //API creation start.............................................................
@@ -75,7 +116,7 @@ app.get('/', (req, res) => {
 
 //User-Related API............................................................
 //GET API
-app.get('/users', async (req, res) => {
+app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
   const result = await userCollection.find({}).toArray();
   console.log(result);
   res.send(result);
@@ -122,7 +163,7 @@ app.patch("/users/:id", async (req, res) => {
 });
 
 //Api for the admin All Users page: change a user's role from the dropdown
-app.patch("/users/:id/role", async (req, res) => {
+app.patch("/users/:id/role", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { role } = req.body;
@@ -203,7 +244,7 @@ app.delete("/users/:id", async (req, res) => {
 
 //Equipment-Related API............................................................
 //Api for add-equipment page as owner
-app.post("/equipments", async (req, res) => {
+app.post("/equipments", verifyToken, verifyOwner, async (req, res) => {
   const equipment = req.body;
   const result = await equipmentCollection.insertOne(equipment);
   res.send(result);
@@ -308,7 +349,7 @@ app.get("/equipments/popular-categories", async (req, res) => {
 
 //Api for the admin All Equipment page: every listing regardless of status.
 //Must be registered before GET /equipments/:email.
-app.get("/equipments/all", async (req, res) => {
+app.get("/equipments/all", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const result = await equipmentCollection.find({}).sort({ _id: -1 }).toArray();
     res.send(result);
@@ -371,7 +412,7 @@ app.patch("/equipments/:id/status", async (req, res) => {
   }
 })
 //Api for a single equipment detail page
-app.get("/equipment/:id", async (req, res) => {
+app.get("/equipment/:id", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -393,15 +434,15 @@ app.get("/equipment/:id", async (req, res) => {
 })
 
 //Api for the my-equipment page for owner
-app.get("/equipments/:email", async (req, res) => {
+app.get("/equipments/:email", verifyToken, verifyOwner,  async (req, res) => {
+  console.log("Headers on the server: ", req.headers);
   const email = req.params.email;
   const result = await equipmentCollection.find({ ownerEmail: email }).toArray();
   res.send(result);
-  console.log("Get Equipments: ", result);
 })
 
 //Api for the my-equipment page for owner
-app.get("/equipment-rental/:email", async (req, res) => {
+app.get("/equipment-rental/:email", verifyToken, verifyOwner, async (req, res) => {
   const email = req.params.email;
   const result = await equipmentCollection.find({ ownerEmail: email, status: "Approved" }).toArray();
   res.send(result);
@@ -500,7 +541,7 @@ app.post("/favorites", async (req, res) => {
 });
 
 //All favorites saved by one customer (newest first)
-app.get("/favorites/:email", async (req, res) => {
+app.get("/favorites/:email", verifyToken, verifyCustomer, async (req, res) => {
   try {
     const result = await favoriteCollection
       .find({ customerEmail: req.params.email })
@@ -733,7 +774,7 @@ app.post("/bookings/confirm", async (req, res) => {
 })
 
 //Confirmed rentals for the customer's My Rentals page
-app.get("/bookings/customer/:email", async (req, res) => {
+app.get("/bookings/customer/:email", verifyToken, verifyCustomer, async (req, res) => {
   try {
     const result = await bookingCollection
       .find({ customerEmail: req.params.email, status: "confirmed" })
@@ -749,7 +790,7 @@ app.get("/bookings/customer/:email", async (req, res) => {
 //Api for the admin All Rentals page: every booking, joined with the customer
 //and owner details. `?status=Pending|Approved|Rejected` filters on the
 //equipment's status directly in the database.
-app.get("/bookings", async (req, res) => {
+app.get("/bookings", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { status } = req.query;
     const query = {};
@@ -895,9 +936,9 @@ app.get("/stats/owner/:email", async (req, res) => {
 
     const bookings = equipmentIds.length
       ? await bookingCollection
-          .find({ equipmentId: { $in: equipmentIds } })
-          .sort({ createdAt: -1 })
-          .toArray()
+        .find({ equipmentId: { $in: equipmentIds } })
+        .sort({ createdAt: -1 })
+        .toArray()
       : [];
 
     const completed = bookings.filter((booking) => booking.status === "confirmed");
