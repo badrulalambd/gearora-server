@@ -2,7 +2,6 @@ import 'dotenv/config'
 import express from 'express';
 import cors from 'cors'
 import { MongoClient, ObjectId } from 'mongodb';
-import { createRemoteJWKSet, jwtVerify } from 'jose';
 import Stripe from 'stripe';
 
 
@@ -105,6 +104,14 @@ const verifyAdmin = async (req, res, next) => {
     }
     next();
 }
+
+const verifyOwnerOrAdmin = (req, res, next) => {
+    if (req.user.role !== 'owner' && req.user.role !== 'admin') {
+        return res.status(403).send({ message: 'Forbidden' });
+    }
+
+    next();
+};
 //..............................................................MIDLEWARES END...........................
 
 
@@ -123,7 +130,7 @@ app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
 })
 
 //Api to update a user's profile details from the profile page
-app.patch("/users/:id", async (req, res) => {
+app.patch("/users/:id", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, image, phone, address } = req.body;
@@ -199,7 +206,7 @@ app.patch("/users/:id/role", verifyToken, verifyAdmin, async (req, res) => {
 });
 
 //Api for the admin All Users page: delete a customer or owner account
-app.delete("/users/:id", async (req, res) => {
+app.delete("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -380,7 +387,7 @@ app.get("/featured-equipments", async (req, res) => {
 });
 
 //Api for the admin All Equipment page: approve or reject a listing
-app.patch("/equipments/:id/status", async (req, res) => {
+app.patch("/equipments/:id/status", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
@@ -411,6 +418,7 @@ app.patch("/equipments/:id/status", async (req, res) => {
     res.status(500).send({ message: "Failed to update equipment status." });
   }
 })
+
 //Api for a single equipment detail page
 app.get("/equipment/:id", verifyToken, async (req, res) => {
   try {
@@ -450,7 +458,7 @@ app.get("/equipment-rental/:email", verifyToken, verifyOwner, async (req, res) =
 })
 
 //Api to delete an equipment from the my-equipment page from owner
-app.delete("/equipments/:id", async (req, res) => {
+app.delete("/equipments/:id", verifyToken, verifyOwnerOrAdmin, async (req, res) => {
   const id = req.params.id;
   const query = { _id: new ObjectId(id) };
   const result = await equipmentCollection.deleteOne(query);
@@ -458,7 +466,7 @@ app.delete("/equipments/:id", async (req, res) => {
   console.log("Deleted Job: ", result);
 })
 //Api to update an equipment detail as a owner from the my-equipment page
-app.patch("/update-equipment/:id", async (req, res) => {
+app.patch("/update-equipment/:id", verifyToken, verifyOwnerOrAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const updatedEquipment = req.body;
